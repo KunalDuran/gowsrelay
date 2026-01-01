@@ -519,30 +519,22 @@ func HandleTCPProxy(w http.ResponseWriter, r *http.Request) {
 	tcpAddr := ln.Addr().(*net.TCPAddr)
 	port := tcpAddr.Port
 
-	// Start goroutine that will accept exactly one TCP connection and proxy it
+	// Start goroutine that accepts exactly ONE connection
 	go func() {
 		defer func() {
 			ln.Close()
+			wsConn.Close() // Close the websocket when listener closes
 			log.Println("tcp listener closed:", ln.Addr())
 		}()
 
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				// If listener is intentionally closed, exit
-				if ne, ok := err.(net.Error); ok && ne.Temporary() {
-					log.Println("temporary accept error:", err)
-					continue
-				}
-				log.Println("tcp accept error:", err)
-				return
-			}
-
-			log.Printf("Client connected on TCP %d for topic %s\n", port, topic)
-
-			// Handle each TCP client independently
-			go handleTCPClient(conn, wsConn)
+		conn, err := ln.Accept() // Accept only ONCE, not in a loop
+		if err != nil {
+			log.Println("tcp accept error:", err)
+			return
 		}
+
+		log.Printf("Client connected on TCP %d for topic %s\n", port, topic)
+		handleTCPClient(conn, wsConn)
 	}()
 
 	// Return JSON with newly opened TCP port
