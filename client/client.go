@@ -10,12 +10,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func CreateWebSocketTunnel(host, port, path, topic string) error {
+func CreateWebSocketTunnel(host, portToOpen, path, topic string) error {
 
 	wsURL := url.URL{
 		Scheme:   "ws",
 		Host:     host,
-		Path:     "/ws",
+		Path:     path,
 		RawQuery: fmt.Sprintf("role=producer&topic=%s", topic),
 	}
 
@@ -29,9 +29,9 @@ func CreateWebSocketTunnel(host, port, path, topic string) error {
 
 	log.Println("Connected to WebSocket server")
 
-	target, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", port))
+	target, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", portToOpen))
 	if err != nil {
-		return fmt.Errorf("failed to connect to target localhost:%s: %w", port, err)
+		return fmt.Errorf("failed to connect to target localhost:%s: %w", portToOpen, err)
 	}
 	defer target.Close()
 
@@ -77,7 +77,7 @@ func CreateWebSocketTunnel(host, port, path, topic string) error {
 		}
 	}()
 
-	log.Println("proxying", port, "to", host, "remote", conn.RemoteAddr())
+	log.Println("proxying", portToOpen, "to", host, "remote", conn.RemoteAddr())
 
 	// Wait for one direction to finish
 	select {
