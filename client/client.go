@@ -16,7 +16,7 @@ func CreateWebSocketTunnel(host, port, path, topic string) error {
 		Scheme:   "ws",
 		Host:     host,
 		Path:     "/ws",
-		RawQuery: fmt.Sprintf("role=producer&topic=%s_%s", topic, port),
+		RawQuery: fmt.Sprintf("role=producer&topic=%s", topic),
 	}
 
 	log.Printf("connecting to %s", wsURL.String())
