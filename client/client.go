@@ -11,7 +11,6 @@ import (
 )
 
 func CreateWebSocketTunnel(host, portToOpen, path, topic string) error {
-
 	wsURL := url.URL{
 		Scheme:   "ws",
 		Host:     host,
@@ -21,81 +20,72 @@ func CreateWebSocketTunnel(host, portToOpen, path, topic string) error {
 
 	log.Printf("connecting to %s", wsURL.String())
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
 	if err != nil {
-		return fmt.Errorf("failed to connect to WebSocket: %w", err)
+		return fmt.Errorf("failed to connect to websocket: %w", err)
 	}
-	defer conn.Close()
+	defer ws.Close()
 
-	log.Println("Connected to WebSocket server")
+	log.Println("connected to websocket")
 
-	target, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", portToOpen))
+	tcpConn, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", portToOpen))
 	if err != nil {
-		return fmt.Errorf("failed to connect to target localhost:%s: %w", portToOpen, err)
+		return fmt.Errorf("failed to connect to local tcp %s: %w", portToOpen, err)
 	}
-	defer target.Close()
+	defer tcpConn.Close()
 
-	errChan := make(chan error, 2)
-	done := make(chan struct{})
-
-	// WS -> TCP
+	errCh := make(chan error, 2)
+	ws.UnderlyingConn()
+	// WS → TCP (reader preserves stream)
 	go func() {
-		defer func() { close(done) }() // signal that at least one direction finished
-
 		for {
-			messageType, message, err := conn.ReadMessage()
+			msgType, r, err := ws.NextReader()
 			if err != nil {
-				nonBlockingSend(errChan, err)
+				errCh <- err
 				return
 			}
-
-			if messageType != websocket.BinaryMessage {
-				log.Println("ignoring non-binary message", messageType)
+			if msgType != websocket.BinaryMessage {
 				continue
 			}
-
-			if _, err = target.Write(message); err != nil {
-				nonBlockingSend(errChan, err)
+			if _, err := io.Copy(tcpConn, r); err != nil {
+				errCh <- err
 				return
 			}
 		}
 	}()
 
-	// TCP -> WS
+	// TCP → WS (writer preserves stream)
 	go func() {
 		buf := make([]byte, 32*1024)
 		for {
-			n, err := target.Read(buf)
+			n, err := tcpConn.Read(buf)
 			if err != nil {
-				nonBlockingSend(errChan, err)
+				errCh <- err
 				return
 			}
-			if err = conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-				nonBlockingSend(errChan, err)
+			w, err := ws.NextWriter(websocket.BinaryMessage)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if _, err := w.Write(buf[:n]); err != nil {
+				w.Close()
+				errCh <- err
+				return
+			}
+			if err := w.Close(); err != nil {
+				errCh <- err
 				return
 			}
 		}
 	}()
 
-	log.Println("proxying", portToOpen, "to", host, "remote", conn.RemoteAddr())
+	log.Printf("proxying local tcp %s ↔ %s", portToOpen, ws.RemoteAddr())
 
-	// Wait for one direction to finish
-	select {
-	case err = <-errChan:
-		if err != nil && err != io.EOF {
-			log.Println("proxy error:", err)
-		}
-	case <-done:
-		// One direction ended without sending an error; still fine.
+	err = <-errCh
+	if err != nil && err != io.EOF {
+		log.Println("tunnel error:", err)
 	}
 
 	return nil
-}
-
-// nonBlockingSend avoids goroutine leaks if nobody is listening anymore
-func nonBlockingSend(ch chan<- error, err error) {
-	select {
-	case ch <- err:
-	default:
-	}
 }
