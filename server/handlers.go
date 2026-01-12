@@ -19,10 +19,6 @@ var proxy = NewProxy()
 
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	roleParam := r.URL.Query().Get("role")
-	if roleParam == "" {
-		http.Error(w, "Missing 'role' parameter (producer/subscriber)", http.StatusBadRequest)
-		return
-	}
 
 	var role Role
 	switch roleParam {
@@ -58,8 +54,12 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := NewClient(conn, role)
-	topic.RegisterClient(client)
-	defer topic.UnregisterClient(client)
+	if err := topic.AddClient(client); err != nil {
+		log.Printf("Failed to add client: %v", err)
+		client.Close()
+		return
+	}
+	defer topic.RemoveClient(client)
 
 	// Wait for client to finish
 	<-client.ctx.Done()

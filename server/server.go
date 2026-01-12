@@ -1,9 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -17,10 +21,6 @@ const (
 
 	MaxMessageSize = 64 * 1024 // 64KB max message
 	QueueSize      = 256       // per-client send queue
-
-	MaxProducersPerTopic   = 1    // Only 1 producer per topic
-	MaxSubscribersPerTopic = 1000 // Max subscribers per topic
-	MaxTopics              = 1000 // Max total topics
 )
 
 type Role string
@@ -44,6 +44,7 @@ type Client struct {
 	cancel context.CancelFunc
 	closed bool
 	mu     sync.Mutex
+	parser func(data []byte) []byte
 }
 
 func NewClient(conn *websocket.Conn, role Role) *Client {
@@ -171,12 +172,11 @@ type Topic struct {
 	producer    *Client
 	subscribers map[string]*Client
 	messages    chan Message
-	register    chan *Client
-	unregister  chan *Client
 	ctx         context.Context
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	mu          sync.RWMutex
+	persist     bool
 }
 
 func NewTopic(name string) *Topic {
@@ -185,8 +185,6 @@ func NewTopic(name string) *Topic {
 		name:        name,
 		subscribers: make(map[string]*Client),
 		messages:    make(chan Message, QueueSize*4), // Larger buffer for hub
-		register:    make(chan *Client, 10),
-		unregister:  make(chan *Client, 10),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
@@ -199,26 +197,30 @@ func NewTopic(name string) *Topic {
 func (t *Topic) run() {
 	defer t.wg.Done()
 
+	var dumper io.WriteCloser
+	if t.persist {
+		file, err := os.Create(t.name + ".hex")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer file.Close()
+
+		dumper = hex.Dumper(file)
+
+		// Ensure the dumper is closed after we are done
+		defer dumper.Close()
+	}
+
 	for {
 		select {
-		case client := <-t.register:
-			if err := t.addClient(client); err != nil {
-				log.Printf("Topic %s: Failed to add client: %v", t.name, err)
-				if !client.IsClosed() {
-					client.Close()
-				}
-				continue
-			}
-
-			// Start client goroutines
-			go client.ReadMessages(t.messages)
-			go client.WriteMessages()
-
-		case client := <-t.unregister:
-			t.removeClient(client)
-
 		case msg := <-t.messages:
 			t.routeMessage(msg)
+			if t.persist && dumper != nil {
+				_, err := io.Copy(dumper, bytes.NewReader(msg.Data))
+				if err != nil {
+					log.Fatal(err)
+				}
+			}
 
 		case <-t.ctx.Done():
 			return
@@ -226,7 +228,7 @@ func (t *Topic) run() {
 	}
 }
 
-func (t *Topic) addClient(client *Client) error {
+func (t *Topic) AddClient(client *Client) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -235,19 +237,19 @@ func (t *Topic) addClient(client *Client) error {
 			return fmt.Errorf("producer already exists")
 		}
 		t.producer = client
-		log.Printf("Topic %s: Producer %s connected", t.name, client.id)
+		log.Printf("Topic %s: Producer connected", t.name)
 	} else {
-		if len(t.subscribers) >= MaxSubscribersPerTopic {
-			return fmt.Errorf("max subscribers reached")
-		}
 		t.subscribers[client.id] = client
-		log.Printf("Topic %s: Subscriber %s connected (total: %d)",
-			t.name, client.id, len(t.subscribers))
+		log.Printf("Topic %s: Subscriber connected (%d total)", t.name, len(t.subscribers))
 	}
+
+	// Start client I/O
+	go client.ReadMessages(t.messages)
+	go client.WriteMessages()
 	return nil
 }
 
-func (t *Topic) removeClient(client *Client) {
+func (t *Topic) RemoveClient(client *Client) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -274,6 +276,9 @@ func (t *Topic) routeMessage(msg Message) {
 		// Producer → All Subscribers
 		dropped := 0
 		for _, sub := range t.subscribers {
+			if sub.parser != nil {
+				msg.Data = sub.parser(msg.Data)
+			}
 			if !sub.Send(msg.Data) {
 				dropped++
 			}
@@ -286,23 +291,6 @@ func (t *Topic) routeMessage(msg Message) {
 		if !t.producer.Send(msg.Data) {
 			log.Printf("Topic %s: Failed to send to producer", t.name)
 		}
-	}
-}
-
-func (t *Topic) RegisterClient(client *Client) {
-	select {
-	case t.register <- client:
-	case <-t.ctx.Done():
-		if !client.IsClosed() {
-			client.Close()
-		}
-	}
-}
-
-func (t *Topic) UnregisterClient(client *Client) {
-	select {
-	case t.unregister <- client:
-	case <-t.ctx.Done():
 	}
 }
 
@@ -361,10 +349,6 @@ func (p *Proxy) GetTopic(name string) (*Topic, error) {
 	// Double-check after write lock
 	if topic = p.topics[name]; topic != nil {
 		return topic, nil
-	}
-
-	if len(p.topics) >= MaxTopics {
-		return nil, fmt.Errorf("max topics reached")
 	}
 
 	topic = NewTopic(name)
