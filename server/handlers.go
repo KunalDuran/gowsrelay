@@ -36,7 +36,6 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		topicName = "default"
 	}
 
-	// Upgrade connection
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Upgrade failed: %v", err)

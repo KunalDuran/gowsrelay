@@ -85,6 +85,7 @@ func CreateWebSocketTunnel(host, portToOpen, path, topic string) error {
 	err = <-errCh
 	if err != nil && err != io.EOF {
 		log.Println("tunnel error:", err)
+		return err
 	}
 
 	return nil
