@@ -10,17 +10,33 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func CreateWebSocketTunnel(host, portToOpen, path, topic string) error {
+type TunnelConfig struct {
+	Scheme string
+	Host   string
+	Port   string // port to open on the device
+	Path   string
+	Topic  string
+}
+
+const (
+	WS  = "ws"
+	WSS = "wss"
+)
+
+func CreateWebSocketTunnel(cfg TunnelConfig) error {
+
 	wsURL := url.URL{
-		Scheme:   "ws",
-		Host:     host,
-		Path:     path,
-		RawQuery: fmt.Sprintf("role=producer&topic=%s", topic),
+		Scheme:   cfg.Scheme,
+		Host:     cfg.Host,
+		Path:     cfg.Path,
+		RawQuery: fmt.Sprintf("role=producer&topic=%s", cfg.Topic),
 	}
 
 	log.Printf("connecting to %s", wsURL.String())
 
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	dialer := websocket.DefaultDialer
+
+	ws, _, err := dialer.Dial(wsURL.String(), nil)
 	if err != nil {
 		return fmt.Errorf("failed to connect to websocket: %w", err)
 	}
@@ -28,9 +44,9 @@ func CreateWebSocketTunnel(host, portToOpen, path, topic string) error {
 
 	log.Println("connected to websocket")
 
-	tcpConn, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", portToOpen))
+	tcpConn, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", cfg.Port))
 	if err != nil {
-		return fmt.Errorf("failed to connect to local tcp %s: %w", portToOpen, err)
+		return fmt.Errorf("failed to connect to local tcp %s: %w", cfg.Port, err)
 	}
 	defer tcpConn.Close()
 
@@ -80,7 +96,7 @@ func CreateWebSocketTunnel(host, portToOpen, path, topic string) error {
 		}
 	}()
 
-	log.Printf("proxying local tcp %s ↔ %s", portToOpen, ws.RemoteAddr())
+	log.Printf("proxying local tcp %s ↔ %s", cfg.Port, ws.RemoteAddr())
 
 	err = <-errCh
 	if err != nil && err != io.EOF {
