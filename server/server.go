@@ -8,11 +8,19 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// Config controls server-side behaviour. Set once at startup via Configure().
+type Config struct {
+	// PersistDir is the base directory where hex dump files are written.
+	// The directory must exist before calling EnablePersist on any topic.
+	PersistDir string
+}
 
 const (
 	WriteTimeout = 5 * time.Second
@@ -176,7 +184,11 @@ type Topic struct {
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	mu          sync.RWMutex
-	persist     bool
+
+	// persist state — guarded by persistMu, independent of mu
+	persistMu   sync.Mutex
+	persistFile *os.File
+	dumper      io.WriteCloser
 }
 
 func NewTopic(name string) *Topic {
@@ -197,35 +209,61 @@ func NewTopic(name string) *Topic {
 func (t *Topic) run() {
 	defer t.wg.Done()
 
-	var dumper io.WriteCloser
-	if t.persist {
-		file, err := os.Create(t.name + ".hex")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer file.Close()
-
-		dumper = hex.Dumper(file)
-
-		// Ensure the dumper is closed after we are done
-		defer dumper.Close()
-	}
-
 	for {
 		select {
 		case msg := <-t.messages:
 			t.routeMessage(msg)
-			if t.persist && dumper != nil {
-				_, err := io.Copy(dumper, bytes.NewReader(msg.Data))
-				if err != nil {
-					log.Fatal(err)
+			t.persistMu.Lock()
+			if t.dumper != nil {
+				if _, err := io.Copy(t.dumper, bytes.NewReader(msg.Data)); err != nil {
+					log.Printf("Topic %s: persist write error: %v", t.name, err)
 				}
 			}
+			t.persistMu.Unlock()
 
 		case <-t.ctx.Done():
 			return
 		}
 	}
+}
+
+// EnablePersist opens (or appends to) a hex dump file for this topic.
+// The file path is fully server-controlled: dir/topicname.hex.
+// filepath.Base on the topic name prevents path traversal.
+func (t *Topic) EnablePersist(dir string) error {
+	t.persistMu.Lock()
+	defer t.persistMu.Unlock()
+
+	if t.dumper != nil {
+		return nil // already enabled
+	}
+
+	path := filepath.Join(dir, filepath.Base(t.name)+".hex")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open persist file %q: %w", path, err)
+	}
+
+	t.persistFile = file
+	t.dumper = hex.Dumper(file)
+	log.Printf("Topic %s: persistence enabled → %s", t.name, path)
+	return nil
+}
+
+// DisablePersist flushes and closes the hex dump file.
+func (t *Topic) DisablePersist() {
+	t.persistMu.Lock()
+	defer t.persistMu.Unlock()
+
+	if t.dumper == nil {
+		return
+	}
+
+	t.dumper.Close()
+	t.dumper = nil
+	t.persistFile.Close()
+	t.persistFile = nil
+	log.Printf("Topic %s: persistence disabled", t.name)
 }
 
 func (t *Topic) AddClient(client *Client) error {
@@ -303,6 +341,7 @@ func (t *Topic) Stats() map[string]interface{} {
 		"has_producer":       t.producer != nil,
 		"subscriber_count":   len(t.subscribers),
 		"message_queue_size": len(t.messages),
+		"persisting":         t.dumper != nil,
 	}
 }
 
@@ -321,17 +360,29 @@ func (t *Topic) Stop() {
 	t.mu.Unlock()
 
 	t.wg.Wait()
+	t.DisablePersist() // flush and close any open hex dump file
 }
 
 type Proxy struct {
 	topics map[string]*Topic
 	mu     sync.RWMutex
+	cfg    Config
 }
 
-func NewProxy() *Proxy {
+func NewProxy(cfg Config) *Proxy {
 	return &Proxy{
 		topics: make(map[string]*Topic),
+		cfg:    cfg,
 	}
+}
+
+// GetExistingTopic returns a topic only if it is already active.
+// Used by admin handlers that should not implicitly create topics.
+func (p *Proxy) GetExistingTopic(name string) (*Topic, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	t, ok := p.topics[name]
+	return t, ok
 }
 
 func (p *Proxy) GetTopic(name string) (*Topic, error) {
