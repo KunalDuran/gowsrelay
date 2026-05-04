@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
 	"regexp"
 	"time"
 
@@ -22,11 +21,6 @@ var proxy *Proxy
 // Configure initialises the proxy with the given config.
 // Must be called before the HTTP server starts accepting connections.
 func Configure(cfg Config) {
-	if cfg.PersistDir != "" {
-		if err := os.MkdirAll(cfg.PersistDir, 0755); err != nil {
-			log.Fatalf("failed to create persist directory %q: %v", cfg.PersistDir, err)
-		}
-	}
 	proxy = NewProxy(cfg)
 }
 
@@ -98,38 +92,3 @@ func HandleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HandleAdminPersist toggles hex-dump persistence for an active topic.
-//
-//	POST   /admin/persist?topic=name  — enable (appends to <PersistDir>/<topic>.hex)
-//	DELETE /admin/persist?topic=name  — disable and flush
-func HandleAdminPersist(w http.ResponseWriter, r *http.Request) {
-	topicName := r.URL.Query().Get("topic")
-	if !validTopicName.MatchString(topicName) {
-		http.Error(w, "missing or invalid topic", http.StatusBadRequest)
-		return
-	}
-
-	topic, ok := proxy.GetExistingTopic(topicName)
-	if !ok {
-		http.Error(w, "topic not found — it must have at least one active connection", http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-
-	switch r.Method {
-	case http.MethodPost:
-		if err := topic.EnablePersist(proxy.cfg.PersistDir); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "persist enabled", "topic": topicName})
-
-	case http.MethodDelete:
-		topic.DisablePersist()
-		json.NewEncoder(w).Encode(map[string]string{"status": "persist disabled", "topic": topicName})
-
-	default:
-		http.Error(w, "POST to enable, DELETE to disable", http.StatusMethodNotAllowed)
-	}
-}

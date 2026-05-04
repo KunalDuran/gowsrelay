@@ -1,14 +1,9 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -17,9 +12,6 @@ import (
 
 // Config controls server-side behaviour. Set once at startup via Configure().
 type Config struct {
-	// PersistDir is the base directory where hex dump files are written.
-	// The directory must exist before calling EnablePersist on any topic.
-	PersistDir string
 }
 
 const (
@@ -184,11 +176,6 @@ type Topic struct {
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	mu          sync.RWMutex
-
-	// persist state — guarded by persistMu, independent of mu
-	persistMu   sync.Mutex
-	persistFile *os.File
-	dumper      io.WriteCloser
 }
 
 func NewTopic(name string) *Topic {
@@ -213,13 +200,6 @@ func (t *Topic) run() {
 		select {
 		case msg := <-t.messages:
 			t.routeMessage(msg)
-			t.persistMu.Lock()
-			if t.dumper != nil {
-				if _, err := io.Copy(t.dumper, bytes.NewReader(msg.Data)); err != nil {
-					log.Printf("Topic %s: persist write error: %v", t.name, err)
-				}
-			}
-			t.persistMu.Unlock()
 
 		case <-t.ctx.Done():
 			return
@@ -227,44 +207,6 @@ func (t *Topic) run() {
 	}
 }
 
-// EnablePersist opens (or appends to) a hex dump file for this topic.
-// The file path is fully server-controlled: dir/topicname.hex.
-// filepath.Base on the topic name prevents path traversal.
-func (t *Topic) EnablePersist(dir string) error {
-	t.persistMu.Lock()
-	defer t.persistMu.Unlock()
-
-	if t.dumper != nil {
-		return nil // already enabled
-	}
-
-	path := filepath.Join(dir, filepath.Base(t.name)+".hex")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open persist file %q: %w", path, err)
-	}
-
-	t.persistFile = file
-	t.dumper = hex.Dumper(file)
-	log.Printf("Topic %s: persistence enabled → %s", t.name, path)
-	return nil
-}
-
-// DisablePersist flushes and closes the hex dump file.
-func (t *Topic) DisablePersist() {
-	t.persistMu.Lock()
-	defer t.persistMu.Unlock()
-
-	if t.dumper == nil {
-		return
-	}
-
-	t.dumper.Close()
-	t.dumper = nil
-	t.persistFile.Close()
-	t.persistFile = nil
-	log.Printf("Topic %s: persistence disabled", t.name)
-}
 
 func (t *Topic) AddClient(client *Client) error {
 	t.mu.Lock()
@@ -341,7 +283,6 @@ func (t *Topic) Stats() map[string]interface{} {
 		"has_producer":       t.producer != nil,
 		"subscriber_count":   len(t.subscribers),
 		"message_queue_size": len(t.messages),
-		"persisting":         t.dumper != nil,
 	}
 }
 
@@ -360,7 +301,6 @@ func (t *Topic) Stop() {
 	t.mu.Unlock()
 
 	t.wg.Wait()
-	t.DisablePersist() // flush and close any open hex dump file
 }
 
 type Proxy struct {
