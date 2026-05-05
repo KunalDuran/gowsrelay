@@ -6,16 +6,19 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
 
 type TunnelConfig struct {
-	Scheme string
-	Host   string
-	Port   string // port to open on the device
-	Path   string
-	Topic  string
+	Scheme    string
+	Host      string
+	Port      string // port to open on the device
+	LocalHost string // local host to forward to; defaults to "localhost"
+	Path      string
+	Topic     string
 }
 
 const (
@@ -24,6 +27,14 @@ const (
 )
 
 func CreateWebSocketTunnel(cfg TunnelConfig) error {
+	if strings.TrimSpace(cfg.LocalHost) == "" {
+		cfg.LocalHost = "localhost"
+	}
+
+	port, err := strconv.Atoi(cfg.Port)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("invalid local port %q: must be a number between 1 and 65535", cfg.Port)
+	}
 
 	wsURL := url.URL{
 		Scheme:   cfg.Scheme,
@@ -44,9 +55,9 @@ func CreateWebSocketTunnel(cfg TunnelConfig) error {
 
 	log.Println("connected to websocket")
 
-	tcpConn, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", cfg.Port))
+	tcpConn, err := net.Dial("tcp", net.JoinHostPort(cfg.LocalHost, cfg.Port))
 	if err != nil {
-		return fmt.Errorf("failed to connect to local tcp %s: %w", cfg.Port, err)
+		return fmt.Errorf("failed to connect to local tcp %s:%s: %w", cfg.LocalHost, cfg.Port, err)
 	}
 	defer tcpConn.Close()
 
