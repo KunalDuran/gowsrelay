@@ -6,35 +6,40 @@ import (
 	"log"
 	"net"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/gorilla/websocket"
 )
 
+// TunnelConfig holds the WebSocket connection parameters.
 type TunnelConfig struct {
-	Scheme    string
-	Host      string
-	Port      string // port to open on the device
-	LocalHost string // local host to forward to; defaults to "localhost"
-	Path      string
-	Topic     string
+	Scheme string
+	Host   string
+	Path   string
+	Topic  string
 }
 
-const (
-	WS  = "ws"
-	WSS = "wss"
-)
+// LocalEndpoint is anything that can act as the local side of the tunnel.
+// TCP conn, subprocess stdio, serial port, whatever — just give us
+// a reader, a writer, and a way to shut it down.
+type LocalEndpoint interface {
+	io.ReadWriteCloser
+}
 
-func CreateWebSocketTunnel(cfg TunnelConfig) error {
-	if strings.TrimSpace(cfg.LocalHost) == "" {
-		cfg.LocalHost = "localhost"
+// TCPEndpoint dials a local TCP port and returns an endpoint.
+func TCPEndpoint(host, port string) (LocalEndpoint, error) {
+	if strings.TrimSpace(host) == "" {
+		host = "localhost"
 	}
+	conn, err := net.Dial("tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return nil, fmt.Errorf("tcp dial %s:%s: %w", host, port, err)
+	}
+	return conn, nil // net.Conn already satisfies io.ReadWriteCloser
+}
 
-	port, err := strconv.Atoi(cfg.Port)
-	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("invalid local port %q: must be a number between 1 and 65535", cfg.Port)
-	}
+func CreateWebSocketTunnel(cfg TunnelConfig, endpoint LocalEndpoint) error {
+	defer endpoint.Close()
 
 	wsURL := url.URL{
 		Scheme:   cfg.Scheme,
@@ -45,25 +50,17 @@ func CreateWebSocketTunnel(cfg TunnelConfig) error {
 
 	log.Printf("connecting to %s", wsURL.String())
 
-	dialer := websocket.DefaultDialer
-
-	ws, _, err := dialer.Dial(wsURL.String(), nil)
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
 	if err != nil {
-		return fmt.Errorf("failed to connect to websocket: %w", err)
+		return fmt.Errorf("websocket dial: %w", err)
 	}
 	defer ws.Close()
 
 	log.Println("connected to websocket")
 
-	tcpConn, err := net.Dial("tcp", net.JoinHostPort(cfg.LocalHost, cfg.Port))
-	if err != nil {
-		return fmt.Errorf("failed to connect to local tcp %s:%s: %w", cfg.LocalHost, cfg.Port, err)
-	}
-	defer tcpConn.Close()
-
 	errCh := make(chan error, 2)
-	ws.UnderlyingConn()
-	// WS → TCP (reader preserves stream)
+
+	// WS → local endpoint
 	go func() {
 		for {
 			msgType, r, err := ws.NextReader()
@@ -74,18 +71,18 @@ func CreateWebSocketTunnel(cfg TunnelConfig) error {
 			if msgType != websocket.BinaryMessage {
 				continue
 			}
-			if _, err := io.Copy(tcpConn, r); err != nil {
+			if _, err := io.Copy(endpoint, r); err != nil {
 				errCh <- err
 				return
 			}
 		}
 	}()
 
-	// TCP → WS (writer preserves stream)
+	// local endpoint → WS
 	go func() {
 		buf := make([]byte, 32*1024)
 		for {
-			n, err := tcpConn.Read(buf)
+			n, err := endpoint.Read(buf)
 			if err != nil {
 				errCh <- err
 				return
@@ -107,13 +104,12 @@ func CreateWebSocketTunnel(cfg TunnelConfig) error {
 		}
 	}()
 
-	log.Printf("proxying local tcp %s ↔ %s", cfg.Port, ws.RemoteAddr())
+	log.Printf("proxying endpoint ↔ %s", wsURL.String())
 
 	err = <-errCh
 	if err != nil && err != io.EOF {
 		log.Println("tunnel error:", err)
 		return err
 	}
-
 	return nil
 }
