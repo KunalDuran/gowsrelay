@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -38,7 +39,7 @@ func TCPEndpoint(host, port string) (LocalEndpoint, error) {
 	return conn, nil // net.Conn already satisfies io.ReadWriteCloser
 }
 
-func CreateWebSocketTunnel(cfg TunnelConfig, endpoint LocalEndpoint) error {
+func CreateWebSocketTunnel(ctx context.Context, cfg TunnelConfig, endpoint LocalEndpoint) error {
 	defer endpoint.Close()
 
 	wsURL := url.URL{
@@ -59,6 +60,17 @@ func CreateWebSocketTunnel(cfg TunnelConfig, endpoint LocalEndpoint) error {
 	log.Println("connected to websocket")
 
 	errCh := make(chan error, 2)
+	done := make(chan struct{})
+	defer close(done)
+
+	// Close the WebSocket when the context is cancelled.
+	go func() {
+		select {
+		case <-ctx.Done():
+			ws.Close()
+		case <-done:
+		}
+	}()
 
 	// WS → local endpoint
 	go func() {
@@ -107,6 +119,9 @@ func CreateWebSocketTunnel(cfg TunnelConfig, endpoint LocalEndpoint) error {
 	log.Printf("proxying endpoint ↔ %s", wsURL.String())
 
 	err = <-errCh
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err != nil && err != io.EOF {
 		log.Println("tunnel error:", err)
 		return err
