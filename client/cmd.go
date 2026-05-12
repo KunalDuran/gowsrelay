@@ -45,20 +45,25 @@ func (c *CmdEndpoint) wake() {
 }
 
 // Write parses p as a command line and spawns it. If a process is already
-// running, the write is dropped with a queued error (the tunnel stays open).
-// Spawn errors are also queued rather than returned, for the same reason.
+// running it is killed first (interrupt-and-replace). Spawn errors are queued
+// rather than returned so the tunnel stays open.
 func (c *CmdEndpoint) Write(p []byte) (int, error) {
 	parts := strings.Fields(strings.TrimSpace(string(p)))
 	if len(parts) == 0 {
 		return len(p), nil
 	}
 
-	c.mu.Lock()
-	busy := c.cmd != nil
-	c.mu.Unlock()
+	// Only kill the running command if the incoming command is "exit"
+	if parts[0] == "exit" {
+		c.mu.Lock()
+		if c.cmd != nil {
+			_ = c.cmd.Process.Kill()
+			c.stdout.Close()
+			c.stdout = nil
+			c.cmd = nil
+		}
+		c.mu.Unlock()
 
-	if busy {
-		c.queueErr(fmt.Errorf("busy: command already running"))
 		return len(p), nil
 	}
 
@@ -121,6 +126,19 @@ func (c *CmdEndpoint) Read(p []byte) (int, error) {
 			continue
 		}
 	}
+}
+
+// Kill terminates the currently running command and returns the endpoint to
+// idle so a new command can be written. No-op if nothing is running.
+func (c *CmdEndpoint) Kill() error {
+	c.mu.Lock()
+	cmd := c.cmd
+	c.mu.Unlock()
+
+	if cmd == nil {
+		return nil
+	}
+	return cmd.Process.Kill()
 }
 
 // Close kills any running process and unblocks a waiting Read.
