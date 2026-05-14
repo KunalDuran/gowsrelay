@@ -40,7 +40,7 @@ type Message struct {
 // (including which role sent it). Use SetWorker / ClearWorker to toggle.
 // The worker runs synchronously in the Topic's message loop; keep it fast or
 // hand off to your own goroutine to avoid backing up the message queue.
-type WorkerFunc func(msg Message)
+type WorkerFunc func(msg Message, opts map[string]any)
 
 type Client struct {
 	id     string
@@ -184,8 +184,9 @@ type Topic struct {
 	wg          sync.WaitGroup
 	mu          sync.RWMutex
 
-	workerMu sync.RWMutex
-	worker   WorkerFunc
+	workerMu   sync.RWMutex
+	worker     WorkerFunc
+	workerArgs map[string]any
 }
 
 func NewTopic(name string) *Topic {
@@ -214,7 +215,7 @@ func (t *Topic) run() {
 			fn := t.worker
 			t.workerMu.RUnlock()
 			if fn != nil {
-				fn(msg)
+				fn(msg, t.workerArgs)
 			}
 
 		case <-t.ctx.Done():
@@ -223,12 +224,13 @@ func (t *Topic) run() {
 	}
 }
 
-
 // SetWorker enables (or replaces) the worker for this topic.
-func (t *Topic) SetWorker(fn WorkerFunc) {
+// args are passed verbatim to every WorkerFunc call; pass nil if unused.
+func (t *Topic) SetWorker(fn WorkerFunc, args map[string]any) {
 	t.workerMu.Lock()
 	defer t.workerMu.Unlock()
 	t.worker = fn
+	t.workerArgs = args
 	log.Printf("Topic %s: worker set", t.name)
 }
 
