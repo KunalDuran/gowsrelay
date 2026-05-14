@@ -91,25 +91,3 @@ func HandleHealth(w http.ResponseWriter, r *http.Request) {
 		"time":   time.Now().Format(time.RFC3339),
 	})
 }
-
-// SetTopicWorker sets a worker on an active topic. Returns false if the topic
-// does not exist (no active connections yet).
-func SetTopicWorker(topicName string, fn WorkerFunc, args map[string]any) bool {
-	topic, ok := proxy.GetExistingTopic(topicName)
-	if !ok {
-		return false
-	}
-	topic.SetWorker(fn, args)
-	return true
-}
-
-// ClearTopicWorker removes the worker from an active topic. Returns false if
-// the topic does not exist.
-func ClearTopicWorker(topicName string) bool {
-	topic, ok := proxy.GetExistingTopic(topicName)
-	if !ok {
-		return false
-	}
-	topic.ClearWorker()
-	return true
-}

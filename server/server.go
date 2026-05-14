@@ -35,13 +35,6 @@ type Message struct {
 	From Role
 }
 
-// WorkerFunc is a side-effect function invoked for every message that passes
-// through a Topic, after routing. The function receives a copy of the message
-// (including which role sent it). Use SetWorker / ClearWorker to toggle.
-// The worker runs synchronously in the Topic's message loop; keep it fast or
-// hand off to your own goroutine to avoid backing up the message queue.
-type WorkerFunc func(msg Message, opts map[string]any)
-
 type Client struct {
 	id     string
 	conn   *websocket.Conn
@@ -183,10 +176,6 @@ type Topic struct {
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	mu          sync.RWMutex
-
-	workerMu   sync.RWMutex
-	worker     WorkerFunc
-	workerArgs map[string]any
 }
 
 func NewTopic(name string) *Topic {
@@ -211,35 +200,10 @@ func (t *Topic) run() {
 		select {
 		case msg := <-t.messages:
 			t.routeMessage(msg)
-			t.workerMu.RLock()
-			fn := t.worker
-			t.workerMu.RUnlock()
-			if fn != nil {
-				fn(msg, t.workerArgs)
-			}
-
 		case <-t.ctx.Done():
 			return
 		}
 	}
-}
-
-// SetWorker enables (or replaces) the worker for this topic.
-// args are passed verbatim to every WorkerFunc call; pass nil if unused.
-func (t *Topic) SetWorker(fn WorkerFunc, args map[string]any) {
-	t.workerMu.Lock()
-	defer t.workerMu.Unlock()
-	t.worker = fn
-	t.workerArgs = args
-	log.Printf("Topic %s: worker set", t.name)
-}
-
-// ClearWorker disables the worker for this topic.
-func (t *Topic) ClearWorker() {
-	t.workerMu.Lock()
-	defer t.workerMu.Unlock()
-	t.worker = nil
-	log.Printf("Topic %s: worker cleared", t.name)
 }
 
 func (t *Topic) AddClient(client *Client) error {
@@ -312,16 +276,11 @@ func (t *Topic) Stats() map[string]interface{} {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	t.workerMu.RLock()
-	hasWorker := t.worker != nil
-	t.workerMu.RUnlock()
-
 	return map[string]interface{}{
 		"name":               t.name,
 		"has_producer":       t.producer != nil,
 		"subscriber_count":   len(t.subscribers),
 		"message_queue_size": len(t.messages),
-		"has_worker":         hasWorker,
 	}
 }
 
