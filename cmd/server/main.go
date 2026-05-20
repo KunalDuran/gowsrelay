@@ -8,12 +8,12 @@ import (
 )
 
 func main() {
-	server.Configure(server.Config{})
+	p := server.NewProxy(server.Config{})
 
-	http.HandleFunc("/ws", server.HandleWebSocket)
-	http.HandleFunc("/tcp", server.HandleTCPProxy)
-	http.HandleFunc("/status", server.HandleStatus)
-	http.HandleFunc("/health", server.HandleHealth)
+	http.HandleFunc("/ws", p.HandleWebSocket)
+	http.HandleFunc("/tcp", p.HandleTCPProxy)
+	http.HandleFunc("/status", p.HandleStatus)
+	http.HandleFunc("/health", p.HandleHealth)
 	log.Println("WebSocket proxy listening on :8090")
 	log.Println("Send request to http://localhost:8090/tcp?role=producer&topic=mytopic")
 	log.Println("role can be 'producer' or 'subscriber'")

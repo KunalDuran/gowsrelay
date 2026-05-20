@@ -12,7 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func HandleTCPProxy(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) HandleTCPProxy(w http.ResponseWriter, r *http.Request) {
 
 	topic := r.URL.Query().Get("topic")
 	if topic == "" {

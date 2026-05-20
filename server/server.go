@@ -30,6 +30,9 @@ const (
 	Subscriber Role = "subscriber"
 )
 
+// Parser transforms outbound bytes before they are delivered to a subscriber.
+type Parser func([]byte) []byte
+
 type Message struct {
 	Data []byte
 	From Role
@@ -254,10 +257,11 @@ func (t *Topic) routeMessage(msg Message) {
 		// Producer → All Subscribers
 		dropped := 0
 		for _, sub := range t.subscribers {
+			data := msg.Data
 			if sub.parser != nil {
-				msg.Data = sub.parser(msg.Data)
+				data = sub.parser(data)
 			}
-			if !sub.Send(msg.Data) {
+			if !sub.Send(data) {
 				dropped++
 			}
 		}
@@ -302,16 +306,25 @@ func (t *Topic) Stop() {
 }
 
 type Proxy struct {
-	topics map[string]*Topic
-	mu     sync.RWMutex
-	cfg    Config
+	topics  map[string]*Topic
+	parsers map[string]Parser
+	mu      sync.RWMutex
+	cfg     Config
 }
 
 func NewProxy(cfg Config) *Proxy {
 	return &Proxy{
-		topics: make(map[string]*Topic),
-		cfg:    cfg,
+		topics:  make(map[string]*Topic),
+		parsers: make(map[string]Parser),
+		cfg:     cfg,
 	}
+}
+
+// RegisterParser registers a named parser. Call before serving connections.
+func (p *Proxy) RegisterParser(name string, fn Parser) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.parsers[name] = fn
 }
 
 // GetExistingTopic returns a topic only if it is already active.

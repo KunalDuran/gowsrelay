@@ -16,19 +16,11 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-var proxy *Proxy
-
-// Configure initialises the proxy with the given config.
-// Must be called before the HTTP server starts accepting connections.
-func Configure(cfg Config) {
-	proxy = NewProxy(cfg)
-}
-
 // validTopicName restricts topic names to safe characters, preventing path
 // traversal even before filepath.Base strips directory components in run().
 var validTopicName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
-func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	roleParam := r.URL.Query().Get("role")
 
 	var role Role
@@ -51,14 +43,28 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var parser Parser
+	if name := r.URL.Query().Get("parser"); name != "" {
+		if role != Subscriber {
+			http.Error(w, "parser param is only valid for subscribers", http.StatusBadRequest)
+			return
+		}
+		p.mu.RLock()
+		parser = p.parsers[name]
+		p.mu.RUnlock()
+		if parser == nil {
+			http.Error(w, "unknown parser: "+name, http.StatusBadRequest)
+			return
+		}
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Upgrade failed: %v", err)
 		return
 	}
 
-	// Get topic and register client
-	topic, err := proxy.GetTopic(topicName)
+	topic, err := p.GetTopic(topicName)
 	if err != nil {
 		log.Printf("Failed to get topic %s: %v", topicName, err)
 		conn.WriteMessage(websocket.CloseMessage,
@@ -68,6 +74,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := NewClient(conn, role)
+	client.parser = parser
+
 	if err := topic.AddClient(client); err != nil {
 		log.Printf("Failed to add client: %v", err)
 		client.Close()
@@ -75,16 +83,15 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer topic.RemoveClient(client)
 
-	// Wait for client to finish
 	<-client.ctx.Done()
 }
 
-func HandleStatus(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(proxy.Stats())
+	json.NewEncoder(w).Encode(p.Stats())
 }
 
-func HandleHealth(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "healthy",
